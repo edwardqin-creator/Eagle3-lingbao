@@ -1,0 +1,10 @@
+*.log
+*.pid
+*.pyc
+__pycache__/
+.DS_Store
+.venv/
+configs/lingbao.env
+artifacts/
+outputs/
+results/

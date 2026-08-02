@@ -1,0 +1,75 @@
+model:
+  target_model_path: "${TARGET_MODEL}"
+  draft_model_config: "${DRAFT_CONFIG}"
+  vocab_mapping_path: "${VOCAB_MAPPING}"
+  target_backend: sglang
+  trust_remote_code: true
+  embedding_key: model.language_model.embed_tokens.weight
+  torch_dtype: bfloat16
+  sglang_mem_fraction_static: ${REPLAY_MEM_FRACTION}
+  sglang_context_length: ${REPLAY_CONTEXT_LENGTH}
+  sglang_max_running_requests: 2
+  aux_hidden_state_layer_ids: [3, 19, 35]
+
+data:
+  prompts_path: "${PRETOKENIZED_DATA}"
+  max_length: ${MAX_LENGTH}
+  chat_template: qwen3.5
+  dataloader_num_workers: 2
+  cache_dir: "${DATA_ROOT}/cache"
+
+training:
+  strategy: eagle3
+  num_epochs: ${NUM_EPOCHS}
+  batch_size: ${BATCH_SIZE}
+  accumulation_steps: ${ACCUMULATION_STEPS}
+  learning_rate: ${LEARNING_RATE}
+  warmup_ratio: ${WARMUP_RATIO}
+  max_grad_norm: ${MAX_GRAD_NORM}
+  ttt_length: ${TTT_LENGTH}
+  attention_backend: ${ATTENTION_BACKEND}
+  compact_teacher: ${COMPACT_TEACHER}
+  compact_teacher_chunk_size: ${COMPACT_TEACHER_CHUNK_SIZE}
+  save_interval: ${SAVE_INTERVAL}
+  max_checkpoints: ${MAX_CHECKPOINTS}
+  log_interval: ${LOG_INTERVAL}
+  dist_timeout: 30
+  seed: ${SPLIT_SEED}
+
+tracking:
+  report_to: tensorboard
+
+runtime:
+  producer_lease: 4
+  in_flight_high_watermark: 32
+  in_flight_low_watermark: 16
+
+run_id: "${EXPERIMENT_NAME}"
+output_dir: "${TRAIN_OUTPUT}"
+
+deployment:
+  mode: disaggregated
+  trainer:
+    nnodes: 1
+    nproc_per_node: 4
+  disaggregated:
+    control_dir: "${TRAIN_OUTPUT}/control"
+    consumer_state_dir: "${TRAIN_OUTPUT}/consumer-state"
+    backend: mooncake
+    managed_local:
+      trainer_cuda_visible_devices: [${TRAIN_GPU_YAML}]
+      mooncake:
+        protocol: tcp
+        global_segment_size_bytes: 17179869184
+        local_buffer_size_bytes: 1073741824
+        startup_timeout_s: 120
+        rpc_port: ${MOONCAKE_RPC_PORT}
+        metadata_port: ${MOONCAKE_METADATA_PORT}
+        metrics_port: ${MOONCAKE_METRICS_PORT}
+      capture_servers:
+        - port: ${CAPTURE_PORT}
+          cuda_visible_devices: [${CAPTURE_GPU_YAML}]
+          tp_size: ${CAPTURE_TP_SIZE}
+          mem_fraction_static: ${REPLAY_MEM_FRACTION}
+          startup_timeout_s: 1800
+      shutdown_grace_s: 60
