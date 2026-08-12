@@ -40,6 +40,15 @@ def arguments() -> argparse.Namespace:
     run.add_argument("--max-retries", type=int, default=2)
     run.add_argument("--fixed-output-tokens", type=int)
     run.add_argument("--ignore-eos", action="store_true")
+    run.add_argument(
+        "--request-diagnostics",
+        action="store_true",
+        help=(
+            "Capture per-request speculative acceptance from the server log. "
+            "Requires concurrency=1 and server --decode-log-interval=1; "
+            "intended for diagnostics, not final throughput measurement."
+        ),
+    )
 
     compare = sub.add_parser("compare")
     compare.add_argument("--baseline", type=Path, required=True)
@@ -132,6 +141,15 @@ async def request_once(
     last_error = ""
     for attempt in range(args.max_retries + 1):
         async with semaphore:
+            capture_request_acceptance = (
+                args.request_diagnostics
+                and not warmup
+                and args.mode == "eagle3"
+                and args.server_log is not None
+            )
+            request_log_start = (
+                log_offset(args.server_log) if capture_request_acceptance else None
+            )
             started = time.perf_counter()
             first_token_at: float | None = None
             pieces: list[str] = []
@@ -160,6 +178,20 @@ async def request_once(
                             finish_reason = choices[0].get("finish_reason") or finish_reason
                 finished = time.perf_counter()
                 first_token_at = first_token_at or finished
+                output_text = "".join(pieces)
+                request_acceptance = None
+                if request_log_start is not None:
+                    # SGLang logs the decode stats before streaming the final
+                    # response.  A short diagnostic-only grace period avoids
+                    # racing buffered stdout without changing request E2E.
+                    await asyncio.sleep(0.02)
+                    request_log_end = log_offset(args.server_log)
+                    request_acceptance = acceptance(
+                        args.server_log,
+                        request_log_start,
+                        args.mode,
+                        end=request_log_end,
+                    )
                 return {
                     "id": str(record.get("id")),
                     "success": True,
@@ -170,8 +202,15 @@ async def request_once(
                     "input_tokens": usage.get("prompt_tokens"),
                     "output_tokens": usage.get("completion_tokens"),
                     "finish_reason": finish_reason,
+                    "output_sha256": hashlib.sha256(
+                        output_text.encode("utf-8")
+                    ).hexdigest(),
+                    "output_preview": (
+                        output_text[:160] if args.request_diagnostics else None
+                    ),
+                    "request_acceptance": request_acceptance,
                     "_prompt": record["prompt"],
-                    "_text": "".join(pieces),
+                    "_text": output_text,
                 }
             except Exception as error:
                 last_error = f"{type(error).__name__}: {error}"
@@ -207,14 +246,20 @@ def log_offset(path: Path | None) -> int:
     return path.stat().st_size if path and path.exists() else 0
 
 
-def acceptance(path: Path | None, offset: int, mode: str) -> dict[str, Any]:
+def acceptance(
+    path: Path | None,
+    offset: int,
+    mode: str,
+    end: int | None = None,
+) -> dict[str, Any]:
     if mode == "baseline":
         return {"decode_log_samples": 0, "avg_accept_length": 1.0, "avg_accept_rate": 0.0}
     if path is None or not path.exists():
         return {"decode_log_samples": 0, "avg_accept_length": None, "avg_accept_rate": None}
     with path.open("rb") as source:
         source.seek(offset)
-        text = source.read().decode("utf-8", errors="replace")
+        size = None if end is None else max(end - offset, 0)
+        text = source.read(size).decode("utf-8", errors="replace")
     matches = [(int(m.group(1)), float(m.group(2)), float(m.group(3))) for m in ACCEPT_RE.finditer(text)]
     matches = [item for item in matches if item[0] > 0]
     if not matches:
@@ -227,6 +272,8 @@ def acceptance(path: Path | None, offset: int, mode: str) -> dict[str, Any]:
         "avg_accept_length": avg_length,
         "p50_accept_length": percentile([item[1] for item in matches], 0.5),
         "p90_accept_length": percentile([item[1] for item in matches], 0.9),
+        "p95_accept_length": percentile([item[1] for item in matches], 0.95),
+        "p99_accept_length": percentile([item[1] for item in matches], 0.99),
         "avg_accept_rate": avg_rate,
         "estimated_target_step_reduction": 1 - 1 / avg_length,
     }
@@ -235,6 +282,11 @@ def acceptance(path: Path | None, offset: int, mode: str) -> dict[str, Any]:
 async def run_benchmark(args: argparse.Namespace) -> int:
     import aiohttp
     from transformers import AutoTokenizer
+
+    if args.request_diagnostics and args.concurrency != 1:
+        raise ValueError("--request-diagnostics requires --concurrency 1")
+    if args.request_diagnostics and args.server_log is None:
+        raise ValueError("--request-diagnostics requires --server-log")
 
     records = read_jsonl(args.input)
     indexes = list(range(len(records)))
@@ -293,6 +345,7 @@ async def run_benchmark(args: argparse.Namespace) -> int:
             [result["tpot_ms"] for result in successful if result["tpot_ms"] is not None]
         ),
         "acceptance": acceptance(args.server_log, offset, args.mode),
+        "request_diagnostics": args.request_diagnostics,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result_summary, ensure_ascii=False, indent=2) + "\n")
@@ -317,6 +370,11 @@ async def run_benchmark(args: argparse.Namespace) -> int:
         f"TPOT p50: {display(result_summary['tpot_ms']['p50'])} ms/token"
     )
     print(f"接受长度/接受率: {a.get('avg_accept_length')} / {a.get('avg_accept_rate')}")
+    if args.request_diagnostics:
+        print(
+            "注意: request diagnostics启用了逐decode日志和20ms日志刷新等待；"
+            "本轮用于请求级归因，不用于最终总吞吐验收。"
+        )
     print(f"结果: {args.output}")
     return 0 if len(successful) == len(results) else 1
 
