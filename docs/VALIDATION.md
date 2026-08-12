@@ -40,4 +40,10 @@ GPU、TP、并发、样本 seed、采样参数
 
 ## 5. 当前历史结果的正确结论
 
-历史 EAGLE3 从 top-k=1/draft=4 的约 1.58，提高到 top-k=4/draft=16 的约 1.94；Train 与 Validation 接近，说明主要矛盾不是普通数据集过拟合。与此同时部分配置 TPOT/E2E 仍回退，说明 1.94 尚不足以覆盖更宽候选树的系统开销。因此下一轮必须把“训练质量”和“serving 搜索”拆开比较。
+截至 2026-08-12，Data V2 全任务 I8K OldOpt E5 在 Validation T=0、`2/2/4`、并发1的正式500条实验中达到接受长度 `2.109`、TPOT `1.133x`、输出吞吐 `1.008x`、E2E改善 `+0.48%`，是当前主线。I4K同口径退化为 `2.077/1.118x/0.997x/-0.47%`；Chat-only专项模型退化为 `1.907/1.027x/0.972x/-3.54%`。
+
+Train/Validation 1500条请求诊断 ACC 分别约 `2.148/2.126`，差值很小，不支持明显过拟合。任务族结果显示信息处理、决策辅助有稳定正收益，闲聊、知识问答仍是主要瓶颈。完整历史和路径见 [EXPERIMENT_OVERVIEW.md](EXPERIMENT_OVERVIEW.md)，复现方法见 [POSTPROCESSING.md](POSTPROCESSING.md)。
+
+## 6. Formal 与 Request Diagnostics
+
+`EVAL_REQUEST_DIAGNOSTICS=1` 会把每条请求对应的 SGLang decode 日志解析进 details；它要求并发1和 `EVAL_DECODE_LOG_INTERVAL=1`。客户端在请求计时结束后等待20ms日志刷新，因此逐请求 TTFT/TPOT/E2E 不直接包含等待，但整轮 `duration_s` 和墙钟吞吐包含等待。诊断结果用于相关性、任务族和难例筛选，最终吞吐必须用 `EVAL_REQUEST_DIAGNOSTICS=0` 重新正式测试。

@@ -1,6 +1,6 @@
-# Lingbao EAGLE3：从数据到验收的 5 步工作流
+# Lingbao EAGLE3：从数据到验收与诊断的可复现工作流
 
-这个仓库把 TENCENT64 上逐步积累的 30 多个实验脚本收敛成 5 个用户入口。目标不是隐藏关键步骤，而是让每一步都有明确输入、输出、检查点和失败恢复方式。
+这个仓库把 TENCENT64 上逐步积累的实验脚本收敛成 7 个用户入口。目标不是隐藏关键步骤，而是让每一步都有明确输入、输出、检查点、失败恢复方式和可追溯实验记录。
 
 ```text
 原始请求日志
@@ -9,6 +9,8 @@
             └─ 03 生成 input_ids/loss_mask/vocab mapping
                  └─ 04 Plan → Train → Checkpoint → Export
                       └─ 05 Baseline/EAGLE3 Validation → 冻结参数 → Test
+                           └─ 06 Val/Train × 多候选树批量评测
+                                └─ 07 请求级ACC/任务族/Train-Val归因
 ```
 
 ## 一、先准备配置
@@ -258,6 +260,51 @@ CONFIRM_FINAL_TEST=1 bash scripts/05_evaluate.sh all test
 
 Test 只回答“冻结后的方案能否上线”，不能看完 Test 再回头调参数，否则 Test 就退化成另一个 Validation。
 
+### Step 6：批量复现候选树与 T=0 Train/Validation
+
+`06_evaluate_matrix.sh` 只生成覆盖配置，不修改原始 `.env`。同一个冻结 Draft 可以一次性跑多个数据集与候选树：
+
+```bash
+BASE_CONFIG=configs/lingbao.env \
+MATRIX_NAME=v2-i8k-e5-t00 \
+DRAFT_MODEL=/data/home/leonardoqin/models/exports/lingbao-eagle3-v2-all-i8k-oldopt-e5-v1-sglang \
+VAL_T0_DATA=/data/home/leonardoqin/datasets/lingbao_eagle3_data/data_version2/val_requests.temperature_0.jsonl \
+TRAIN_T0_DATA=/data/home/leonardoqin/datasets/lingbao_eagle3_data/data_version2/train_requests.temperature_0.jsonl \
+SPLITS="val train" \
+TREES="s2k2d4:2:2:4 s3k1d4:3:1:4" \
+EVAL_GPU_DEVICES="6,7" \
+bash scripts/06_evaluate_matrix.sh plan
+
+# 检查 artifacts/eval-matrix/v2-i8k-e5-t00/*.env 后正式执行：
+# 将末尾 plan 改成 run。
+```
+
+正式验收默认 `EVAL_MODE=formal`。如要生成每条请求的接受长度，显式使用：
+
+```bash
+EVAL_MODE=diagnostic EVAL_LIMIT=1500 \
+  bash scripts/06_evaluate_matrix.sh run
+```
+
+诊断轮强制并发 1、`decode-log-interval=1`，只用于请求级归因；它产生的墙钟总吞吐不能代替正式验收。
+
+### Step 7：实验台账和请求级后处理
+
+```bash
+# 从 experiments/registry.json 生成历史台账；线上存在结果JSON时自动读取实测值。
+bash scripts/07_postprocess.sh ledger
+
+# 将 Manifest、请求、Baseline/EAGLE3 details 合并为可筛选CSV/JSON。
+MANIFEST=/data/home/leonardoqin/datasets/lingbao_eagle3_data/data_version2/split_manifest.jsonl \
+REQUESTS=/data/home/leonardoqin/datasets/lingbao_eagle3_data/data_version2/val_requests.temperature_0.jsonl \
+RESULT_DIR=/data/home/leonardoqin/datasets/lingbao_eagle3_data/benchmark_results/lingbao-v2-e5-t00-s2k2d4-requestdiag-v1/validation \
+SPLIT=val \
+ANALYSIS_NAME=v2-e5-val-t00-s2k2d4 \
+bash scripts/07_postprocess.sh analyze
+```
+
+完整操作、指标口径和 Train/Val 对比见 [docs/POSTPROCESSING.md](docs/POSTPROCESSING.md)。截至 2026-08-12 的实验结论见 [docs/EXPERIMENT_OVERVIEW.md](docs/EXPERIMENT_OVERVIEW.md)。
+
 ## 三、如何读验收结果
 
 最关心的 `avg_accept_length` 表示一次 Target 验证平均推进多少 token。它从 1.5 提升到 2.0，理论 Target 调用步数下降，但不代表端到端一定加速，因为 Draft 建树、采样、KV 和验证都有额外开销。
@@ -283,9 +330,11 @@ scripts/02_replay.sh             多服务 Target 重放
 scripts/03_prepare_training.sh   token/mask/mapping
 scripts/04_train.sh              doctor/plan/train/export
 scripts/05_evaluate.sh           smoke/validation/test A/B
+scripts/06_evaluate_matrix.sh    Val/Train × 候选树批量评测
+scripts/07_postprocess.sh        台账/请求级/任务族/Train-Val后处理
 ```
 
-`tools/` 是上述入口调用的内部实现，不需要日常逐个执行。完整故障记录见 [docs/DEBUGGING.md](docs/DEBUGGING.md)，调参决策见 [docs/VALIDATION.md](docs/VALIDATION.md)。
+`tools/` 是上述入口调用的内部实现，不需要日常逐个执行。完整故障记录见 [docs/DEBUGGING.md](docs/DEBUGGING.md)，调参决策见 [docs/VALIDATION.md](docs/VALIDATION.md)。所有重要实验都应登记到 [experiments/registry.json](experiments/registry.json)，不要只留在聊天记录或终端历史中。
 
 ## 五、与 SpecForge 官方流程的关系
 

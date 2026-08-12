@@ -63,6 +63,7 @@ start_server() {
       --context-length '${EVAL_CONTEXT_LENGTH}' \\
       --mem-fraction-static '${EVAL_MEM_FRACTION}' \\
       --max-running-requests 8 \\
+      --decode-log-interval '${EVAL_DECODE_LOG_INTERVAL:-40}' \\
       --host 127.0.0.1 --port '${EVAL_PORT}' --trust-remote-code \\
       ${spec_args}
   " >"${log}" 2>&1 &
@@ -97,6 +98,7 @@ run_mode() {
     benchmark_extra+=(--fixed-output-tokens "${EVAL_FIXED_OUTPUT_TOKENS}")
   fi
   [[ "${EVAL_IGNORE_EOS:-0}" == 1 ]] && benchmark_extra+=(--ignore-eos)
+  [[ "${EVAL_REQUEST_DIAGNOSTICS:-0}" == 1 ]] && benchmark_extra+=(--request-diagnostics)
   for concurrency in "${concurrencies[@]}"; do
     "${SPEC_FORGE_PYTHON}" "${REPO_ROOT}/tools/benchmark.py" run \
       --name "${EXPERIMENT_NAME}_${stage}_${mode}_c${concurrency}" \
